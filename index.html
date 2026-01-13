@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;900&display=swap');
+        body, html { margin: 0; padding: 0; background: #000; color: #fff; font-family: 'Orbitron', sans-serif; overflow: hidden; touch-action: none; }
+        #lobby { position: fixed; inset: 0; background: #050505; display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 100; }
+        .ui { position: fixed; inset: 0; pointer-events: none; z-index: 10; display: none; }
+        .leaderboard { position: absolute; top: 15px; right: 15px; background: rgba(0,0,0,0.85); padding: 12px; border: 2px solid #00fff9; border-radius: 8px; min-width: 160px; }
+        .lb-item { display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 4px; font-weight: 900; }
+        .minimap { position: absolute; bottom: 20px; right: 20px; width: 140px; height: 140px; background: rgba(0,0,0,0.8); border: 2px solid #333; border-radius: 50%; overflow: hidden; }
+        #room-id { position: absolute; bottom: 15px; left: 15px; font-size: 11px; color: #00fff9; pointer-events: all; cursor: pointer; background: rgba(0,0,0,0.6); padding: 8px; border-radius: 5px; border: 1px solid #333; }
+        #respawn-timer { font-size: 4rem; color: #ff0055; display: none; margin-top: 20px; }
+        .btn { background: #00fff9; color: #000; border: none; padding: 15px 35px; font-weight: 900; cursor: pointer; border-radius: 5px; margin-top: 10px; width: 240px; }
+        input { padding: 12px; width: 216px; background: #111; border: 1px solid #333; color: #fff; text-align: center; border-radius: 5px; font-family: 'Orbitron'; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+
+<div id="lobby">
+    <h1 style="color: #00fff9; letter-spacing: 5px; text-shadow: 0 0 15px #00fff9;">NEON OVERLORD</h1>
+    <div id="status" style="margin-bottom: 20px; font-size: 11px; color: #555;">Connecting...</div>
+    <div id="respawn-timer">3</div>
+    <div id="lobby-controls">
+        <input type="text" id="join-id" placeholder="ROOM CODE">
+        <button class="btn" onclick="start(true)">JOIN</button>
+        <button class="btn" style="background: #fff;" onclick="start(false)">HOST</button>
+    </div>
+</div>
+
+<div class="ui" id="ui">
+    <div id="room-id" onclick="copyId()">CODE: <span id="code-val">...</span></div>
+    <div class="leaderboard"><div id="lb-content"></div></div>
+    <canvas id="mini" class="minimap"></canvas>
+</div>
+
+<canvas id="game"></canvas>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const mini = document.getElementById('mini');
+const mctx = mini.getContext('2d');
+const peer = new Peer();
+
+const GRID = 25, ARENA_R = 1500, SPEED = 6.8, ZOOM = 0.45;
+canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+mini.width = 140; mini.height = 140;
+
+let myId = "";
+let player = { x: 0, y: 0, color: '', trail: [], land: new Set(), angle: 0, inputAngle: 0 };
+let opponents = {}, particles = [], active = false;
+
+peer.on('open', id => { 
+    myId = id; 
+    document.getElementById('status').innerText = "YOUR CODE: " + id;
+    document.getElementById('code-val').innerText = id;
+});
+
+peer.on('connection', setupConn);
+
+function start(isJoin) {
+    if (isJoin) { const id = document.getElementById('join-id').value; if (id) setupConn(peer.connect(id)); }
+    resetPlayer();
+    document.getElementById('lobby').style.display = 'none';
+    document.getElementById('ui').style.display = 'block';
+    active = true;
+    requestAnimationFrame(loop);
+}
+
+function resetPlayer() {
+    player.color = `hsl(${Math.random()*360},100%,60%)`;
+    player.x = (Math.random()-0.5) * 800; player.y = (Math.random()-0.5) * 800;
+    player.trail = []; player.land = new Set();
+    player.angle = Math.random() * 6; player.inputAngle = player.angle;
+    const gx = Math.floor(player.x/GRID), gy = Math.floor(player.y/GRID);
+    for(let i=-2; i<=2; i++) for(let j=-2; j<=2; j++) player.land.add(`${gx+i},${gy+j}`);
+}
+
+function setupConn(conn) {
+    conn.on('open', () => {
+        if(!active) start(false);
+        conn.on('data', data => {
+            if(data.type === 'sync') opponents[conn.peer] = data.state;
+            if(data.type === 'kill' && data.target === peer.id) die();
+        });
+    });
+}
+
+function die() {
+    if (!active) return; active = false;
+    player.land.forEach(k => {
+        const [x, y] = k.split(',').map(Number);
+        particles.push({x: x*GRID, y: y*GRID, vx: (Math.random()-0.5)*30, vy: (Math.random()-0.5)*30, life: 1, color: player.color});
+    });
+    document.getElementById('lobby').style.display = 'flex';
+    document.getElementById('lobby-controls').style.display = 'none';
+    const timerEl = document.getElementById('respawn-timer');
+    timerEl.style.display = 'block';
+    let count = 3; timerEl.innerText = count;
+    const interval = setInterval(() => {
+        count--;
+        if (count <= 0) {
+            clearInterval(interval); timerEl.style.display = 'none';
+            document.getElementById('lobby-controls').style.display = 'flex';
+            resetPlayer(); active = true; document.getElementById('lobby').style.display = 'none';
+        } else { timerEl.innerText = count; }
+    }, 1000);
+}
+
+function loop() {
+    if (active) {
+        let diff = player.inputAngle - player.angle;
+        while (diff < -Math.PI) diff += Math.PI * 2;
+        while (diff > Math.PI) diff -= Math.PI * 2;
+        player.angle += diff * 0.15;
+        player.x += Math.cos(player.angle) * SPEED;
+        player.y += Math.sin(player.angle) * SPEED;
+        const dist = Math.hypot(player.x, player.y);
+        if (dist > ARENA_R) { player.x = (player.x/dist)*ARENA_R; player.y = (player.y/dist)*ARENA_R; }
+        const gx = Math.floor(player.x / GRID), gy = Math.floor(player.y / GRID), key = `${gx},${gy}`;
+        if (player.land.has(key)) { if (player.trail.length > 0) { capture(); player.trail = []; } }
+        else { if (!player.trail.includes(key)) player.trail.push(key); }
+        Object.entries(opponents).forEach(([id, opp]) => {
+            if (opp.trail.includes(key)) {
+                Object.values(peer.connections).forEach(conns => conns.forEach(c => c.open && c.send({type: 'kill', target: id})));
+                delete opponents[id];
+            }
+        });
+    }
+    particles.forEach((p, i) => { p.x += p.vx; p.y += p.vy; p.life -= 0.02; if(p.life <= 0) particles.splice(i, 1); });
+    draw();
+    if(active) sync();
+    requestAnimationFrame(loop);
+}
+
+function capture() {
+    let minX=Infinity, maxX=-Infinity, minY=Infinity, maxY=-Infinity;
+    player.trail.forEach(k => {
+        const [x,y] = k.split(',').map(Number);
+        minX=Math.min(minX,x); maxX=Math.max(maxX,x); minY=Math.min(minY,y); maxY=Math.max(maxY,y);
+    });
+    for(let x=minX; x<=maxX; x++) for(let y=minY; y<=maxY; y++) player.land.add(`${x},${y}`);
+}
+
+function draw() {
+    ctx.setTransform(1,0,0,1,0,0); ctx.fillStyle='#010103'; ctx.fillRect(0,0,canvas.width,canvas.height);
+    ctx.translate(canvas.width/2, canvas.height/2); ctx.scale(ZOOM, ZOOM); ctx.translate(-player.x, -player.y);
+
+    // --- VISIBLE ARENA BOUNDARY CIRCLE ---
+    ctx.beginPath();
+    ctx.arc(0, 0, ARENA_R, 0, Math.PI * 2);
+    ctx.strokeStyle = '#333'; ctx.lineWidth = 10; ctx.stroke();
+    ctx.strokeStyle = '#00fff9'; ctx.lineWidth = 2; ctx.stroke(); // Inner Neon line
+
+    const render = (p, isSelf) => {
+        // Land
+        ctx.globalAlpha = 0.3; ctx.fillStyle = p.color;
+        p.land.forEach(k => {
+            const [x,y] = k.split(',').map(Number);
+            ctx.fillRect(x*GRID, y*GRID, GRID, GRID);
+        });
+
+        // Land Boundaries
+        ctx.globalAlpha = 1; ctx.strokeStyle = p.color; ctx.lineWidth = 2;
+        p.land.forEach(k => {
+            const [x,y] = k.split(',').map(Number);
+            if(!p.land.has(`${x+1},${y}`)) { ctx.beginPath(); ctx.moveTo((x+1)*GRID, y*GRID); ctx.lineTo((x+1)*GRID, (y+1)*GRID); ctx.stroke(); }
+            if(!p.land.has(`${x-1},${y}`)) { ctx.beginPath(); ctx.moveTo(x*GRID, y*GRID); ctx.lineTo(x*GRID, (y+1)*GRID); ctx.stroke(); }
+            if(!p.land.has(`${x},${y+1}`)) { ctx.beginPath(); ctx.moveTo(x*GRID, (y+1)*GRID); ctx.lineTo((x+1)*GRID, (y+1)*GRID); ctx.stroke(); }
+            if(!p.land.has(`${x},${y-1}`)) { ctx.beginPath(); ctx.moveTo(x*GRID, y*GRID); ctx.lineTo((x+1)*GRID, y*GRID); ctx.stroke(); }
+        });
+        
+        // Trail
+        if (p.trail && p.trail.length > 0) {
+            ctx.globalAlpha = 0.9; ctx.fillStyle = p.color;
+            p.trail.forEach(k => { const [x,y] = k.split(',').map(Number); ctx.fillRect(x*GRID, y*GRID, GRID, GRID); });
+            // Circle Capture Preview
+            if (isSelf) {
+                let minX=Infinity, maxX=-Infinity, minY=Infinity, maxY=-Infinity;
+                p.trail.forEach(k => { const [x,y] = k.split(',').map(Number); minX=Math.min(minX,x); maxX=Math.max(maxX,x); minY=Math.min(minY,y); maxY=Math.max(maxY,y); });
+                ctx.globalAlpha = 0.4; ctx.strokeStyle = '#fff'; ctx.lineWidth = 3;
+                ctx.strokeRect(minX*GRID, minY*GRID, (maxX-minX+1)*GRID, (maxY-minY+1)*GRID);
+            }
+        }
+        // Head
+        if(active || !isSelf) {
+            ctx.globalAlpha = 1; ctx.fillStyle = isSelf ? '#fff' : p.color;
+            ctx.fillRect(p.x-15, p.y-15, 30, 30);
+        }
+    };
+
+    Object.values(opponents).forEach(o => render(o, false));
+    if(active) render(player, true);
+    particles.forEach(p => { ctx.globalAlpha=p.life; ctx.fillStyle=p.color; ctx.fillRect(p.x, p.y, 14, 14); });
+
+    // Minimap
+    mctx.fillStyle = '#000'; mctx.fillRect(0,0,140,140);
+    const mScale = 140 / (ARENA_R * 2);
+    if(active) { mctx.fillStyle = '#fff'; mctx.beginPath(); mctx.arc((player.x+ARENA_R)*mScale, (player.y+ARENA_R)*mScale, 3, 0, 7); mctx.fill(); }
+    Object.values(opponents).forEach(o => { mctx.fillStyle = o.color; mctx.beginPath(); mctx.arc((o.x+ARENA_R)*mScale, (o.y+ARENA_R)*mScale, 2, 0, 7); mctx.fill(); });
+}
+
+function sync() {
+    const s = { x: player.x, y: player.y, color: player.color, trail: player.trail, land: Array.from(player.land) };
+    Object.values(peer.connections).forEach(conns => conns.forEach(c => c.open && c.send({type:'sync', state: s})));
+    let lb = [{n:'YOU', c:player.color, s:player.land.size}];
+    Object.values(opponents).forEach(o => lb.push({n:'OPP', c:o.color, s:o.land ? o.land.length : 0}));
+    lb.sort((a,b) => b.s - a.s);
+    document.getElementById('lb-content').innerHTML = lb.slice(0,5).map((i, r) => `<div class="lb-item"><span style="color:${i.c}">${r==0?'👑 ':''}${i.n}</span><span>${i.s}</span></div>`).join('');
+}
+
+function copyId() { navigator.clipboard.writeText(myId); alert("Code Copied!"); }
+const updateInput = (e) => {
+    const x = e.touches ? e.touches[0].clientX : e.clientX, y = e.touches ? e.touches[0].clientY : e.clientY;
+    player.inputAngle = Math.atan2(y - canvas.height/2, x - canvas.width/2);
+};
+window.addEventListener('mousemove', updateInput);
+window.addEventListener('touchmove', e => { e.preventDefault(); updateInput(e); }, {passive: false});
+window.addEventListener('touchstart', updateInput);
+</script>
+</body>
+</html>
